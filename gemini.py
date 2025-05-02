@@ -27,7 +27,6 @@ def generate_sql_from_gemini(question: str, table_schema: str) -> str:
         model="gemini-2.0-flash", contents=prompt
     )
     
-    # Clean the response to remove any Markdown formatting like ```sql
     sql_query = response.text.strip()
     sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
     

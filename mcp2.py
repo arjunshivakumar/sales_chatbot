@@ -7,10 +7,12 @@ from google import genai
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
+import sqlparse
 from sql_validator import validate_sql_query
 from session_manager import SessionManager
 from typing import Optional
 from fastapi.background import BackgroundTasks
+import time
 
 load_dotenv()
 
@@ -30,14 +32,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize session manager
 session_manager = SessionManager()
 
+# Schedule periodic cleanup
 def cleanup_old_sessions():
     session_manager.clean_old_sessions(max_age_hours=24)
 
 class AskRequest(BaseModel):
     question: str
-    session_id: Optional[str] = None  
+    session_id: Optional[str] = None  # Now optional
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -64,7 +68,9 @@ def fetch_database_schema():
     
     schema = {}
     
+    # For each table, get its columns
     for table in tables:
+        # Get columns and data types
         cursor.execute(f"""
             SELECT column_name, data_type
             FROM information_schema.columns
@@ -76,8 +82,8 @@ def fetch_database_schema():
             "columns": columns,
             "foreign_keys": []
         }
-
-    # Foreign key relations    
+    
+    # Get foreign key relationships
     cursor.execute("""
         SELECT
             tc.table_name AS table_name,
@@ -125,13 +131,15 @@ def run_query(sql):
 def generate_sql_query(question, schema, session_id=None):
     schema_json = json.dumps(schema, indent=2)
     
+    # Get conversation history if session_id is provided
     conversation_history = []
     if session_id:
         conversation_history = session_manager.get_conversation_history(session_id)
     
+    # Format the conversation history for the prompt
     conversation_context = ""
     if conversation_history:
-        # Include last 5 conversations as context
+        # Include up to the last 5 interactions to avoid prompt getting too large
         recent_conversations = conversation_history[-5:]
         conversation_context = "Previous conversation:\n"
         for idx, conv in enumerate(recent_conversations):
@@ -173,6 +181,7 @@ def generate_sql_query(question, schema, session_id=None):
 
     sql_query = response.text.strip().replace("```sql", "").replace("```", "").strip()
 
+    # Apply the advanced validation using our new validator
     is_valid, validation_message = validate_sql_query(sql_query, schema)
     
     if not is_valid:
@@ -193,12 +202,15 @@ def generate_sql_query(question, schema, session_id=None):
 def explain_sql_query(question, sql_query, schema, session_id=None):
     schema_json = json.dumps(schema, indent=2)
     
+    # Get conversation history if session_id is provided
     conversation_history = []
     if session_id:
         conversation_history = session_manager.get_conversation_history(session_id)
     
+    # Format recent conversation context
     conversation_context = ""
     if conversation_history:
+        # Include just the last interaction to keep the context focused
         last_conversation = conversation_history[-1]
         conversation_context = "This question may be related to previous conversations.\n"
         conversation_context += f"Previous question: {last_conversation['question']}\n"
@@ -236,12 +248,15 @@ def explain_sql_query(question, sql_query, schema, session_id=None):
     return response.text.strip()
 
 def summarize_results(question, sql_query, results, session_id=None):
+    # Get conversation history if session_id is provided
     conversation_history = []
     if session_id:
         conversation_history = session_manager.get_conversation_history(session_id)
     
+    # Format the conversation context
     conversation_context = ""
     if conversation_history:
+        # Include the last conversation for context if it exists
         last_conversation = conversation_history[-1]
         conversation_context = "Consider this may be a follow-up to a previous question:\n"
         conversation_context += f"Previous question: {last_conversation['question']}\n"
@@ -303,10 +318,12 @@ async def get_session(session_id: str):
 
 @app.post("/ask")
 async def ask(request: AskRequest, background_tasks: BackgroundTasks):
+    # Create a new session if none provided
     session_id = request.session_id
     if not session_id:
         session_id = session_manager.create_session()
     elif not session_manager.get_session(session_id):
+        # If provided session doesn't exist, create it
         session_id = session_manager.create_session()
     
     # Try to get schema from cache first
@@ -316,7 +333,7 @@ async def ask(request: AskRequest, background_tasks: BackgroundTasks):
     if not schema:
         try:
             schema = fetch_database_schema()
-            # Cache the schema 
+            # Cache the schema for future use
             session_manager.update_session(session_id, schema_cache=schema)
         except Exception as e:
             raise HTTPException(status_code=500, detail="Could not fetch database schema.")
@@ -324,7 +341,7 @@ async def ask(request: AskRequest, background_tasks: BackgroundTasks):
     try:
         sql_query = generate_sql_query(request.question, schema, session_id)
     except HTTPException as e:
-        raise e  
+        raise e  # Already handled in generate_sql_query
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error generating SQL query.")
 
@@ -341,6 +358,7 @@ async def ask(request: AskRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error generating explanation or summary.")
     
+    # Update session with the new conversation
     session_manager.update_session(
         session_id, 
         question=request.question,
@@ -349,6 +367,7 @@ async def ask(request: AskRequest, background_tasks: BackgroundTasks):
         answer=answer
     )
     
+    # Schedule cleanup of old sessions
     background_tasks.add_task(cleanup_old_sessions)
     
     return {

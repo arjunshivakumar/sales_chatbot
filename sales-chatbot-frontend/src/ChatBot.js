@@ -6,6 +6,7 @@ const ChatBot = () => {
   const [question, setQuestion] = useState('');
   const [responses, setResponses] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
   const messagesEndRef = useRef(null);
 
   // Auto-scroll to bottom when new messages appear
@@ -16,6 +17,21 @@ const ChatBot = () => {
   useEffect(() => {
     scrollToBottom();
   }, [responses]);
+
+  // Initialize session when component mounts
+  useEffect(() => {
+    const initializeSession = async () => {
+      try {
+        const response = await axios.post('http://localhost:8000/session');
+        setSessionId(response.data.session_id);
+        console.log('Session initialized:', response.data.session_id);
+      } catch (error) {
+        console.error('Error initializing session:', error);
+      }
+    };
+
+    initializeSession();
+  }, []);
 
   const handleQuestionChange = (e) => {
     setQuestion(e.target.value);
@@ -32,9 +48,9 @@ const ChatBot = () => {
     setLoading(true);
 
     try {
-      const response = await axios.post('http://localhost:8001/ask', {
+      const response = await axios.post('http://localhost:8000/ask', {
         question: userQuestion,
-        session_id: "frontend-user-123"
+        session_id: sessionId
       });
       
       // Update the last message with bot response
@@ -42,10 +58,19 @@ const ChatBot = () => {
         const newResponses = [...prev];
         newResponses[newResponses.length - 1] = { 
           user: userQuestion, 
-          bot: response.data.gemini_answer 
+          bot: {
+            answer: response.data.answer,
+            sqlQuery: response.data.sql_query,
+            explanation: response.data.sql_explanation
+          }
         };
         return newResponses;
       });
+
+      // Update session ID if it was created in the response
+      if (response.data.session_id && !sessionId) {
+        setSessionId(response.data.session_id);
+      }
     } catch (error) {
       console.error('Error sending question:', error);
       
@@ -54,7 +79,9 @@ const ChatBot = () => {
         const newResponses = [...prev];
         newResponses[newResponses.length - 1] = { 
           user: userQuestion, 
-          bot: "Sorry, something went wrong. Please try again." 
+          bot: {
+            answer: error.response?.data?.detail || "Sorry, something went wrong. Please try again."
+          }
         };
         return newResponses;
       });
@@ -68,6 +95,19 @@ const ChatBot = () => {
       e.preventDefault();
       handleSubmit(e);
     }
+  };
+
+  // Toggle SQL details visibility
+  const toggleSqlDetails = (index) => {
+    setResponses(prev => {
+      const newResponses = [...prev];
+      if (newResponses[index].bot.showDetails === undefined) {
+        newResponses[index].bot.showDetails = true;
+      } else {
+        newResponses[index].bot.showDetails = !newResponses[index].bot.showDetails;
+      }
+      return newResponses;
+    });
   };
 
   return (
@@ -96,7 +136,36 @@ const ChatBot = () => {
                     <span></span>
                   </span>
                 ) : (
-                  response.bot
+                  <div className="bot-response">
+                    <div className="answer">{response.bot.answer}</div>
+                    
+                    {response.bot.sqlQuery && (
+                      <div className="sql-container">
+                        <button 
+                          className="toggle-sql-btn"
+                          onClick={() => toggleSqlDetails(index)}
+                        >
+                          {response.bot.showDetails ? 'Hide SQL Details' : 'Show SQL Details'}
+                        </button>
+                        
+                        {response.bot.showDetails && (
+                          <div className="sql-details">
+                            <div className="sql-query">
+                              <h4>SQL Query:</h4>
+                              <pre>{response.bot.sqlQuery}</pre>
+                            </div>
+                            
+                            {response.bot.explanation && (
+                              <div className="sql-explanation">
+                                <h4>Explanation:</h4>
+                                <p>{response.bot.explanation}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
